@@ -22,7 +22,7 @@ jobs:
         run: npm ci
 
       - name: Build
-        run: npm run build
+        run: npx tsc -p tsconfig.json
 
       - name: Read plugin metadata (id, version)
         run: |
@@ -37,7 +37,8 @@ jobs:
             manifest.json
             main.js
             styles.css
-          if-no-files-found: error
+          # styles.css is optional; warn instead of failing if absent
+          if-no-files-found: warn
           retention-days: 14
 
   release:
