@@ -102,12 +102,62 @@ function findBaseBlock(text: string): BaseBlockInfo | null {
   return { start: fenceIdx, end: fenceEnd + 4, filtersStart: beginIdx, filtersEnd: endIdx + END_MARK.length };
 }
 
+// Remove the first top-level `filters:` block from a Base block's inner content
+function stripTopLevelFilters(blockContent: string): string {
+  const lines = blockContent.split("\n");
+  // Find a line that starts at column 0 with `filters:`
+  let start = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (/^filters\s*:/.test(lines[i])) { start = i; break; }
+  }
+  if (start === -1) return blockContent;
+  // Consume subsequent indented lines (YAML block)
+  let end = start + 1;
+  while (end < lines.length) {
+    const l = lines[end];
+    // Stop at next top-level line (no leading space) or end
+    if (!/^\s+/.test(l) && l.trim().length > 0) break;
+    end++;
+  }
+  const cleaned = [...lines.slice(0, start), ...lines.slice(end)].join("\n");
+  return cleaned;
+}
+
 async function findOrInsertBaseBlock(app: App, file: TFile): Promise<BaseBlockInfo | null> {
   // Avoid editor dependency; always work from the file contents
   let text = await app.vault.read(file);
+  // 1) If there's already a managed filters section inside a Base block, use it
   let info = findBaseBlock(text);
   if (info) return info;
 
+  // 2) If there is an existing Base block (without our markers), insert our managed
+  //    filter section at the top of that block and preserve the rest as-is.
+  const fenceIdx = text.indexOf(FENCE_START);
+  if (fenceIdx >= 0) {
+    const closeFenceIdx = text.indexOf("\n```", fenceIdx + FENCE_START.length);
+    if (closeFenceIdx >= 0) {
+      // Find the start of the block content (the first newline after ```base)
+      const firstNlAfterOpen = text.indexOf("\n", fenceIdx);
+      const contentStart = firstNlAfterOpen >= 0 ? firstNlAfterOpen + 1 : (fenceIdx + FENCE_START.length);
+      const blockInner = text.slice(contentStart, closeFenceIdx);
+      const cleanedInner = stripTopLevelFilters(blockInner);
+      // Build our managed section to inject at the top of the Base block
+      const managed = [
+        BEGIN_MARK,
+        "filters:\n  - contains(file.tags, \"\")",
+        END_MARK,
+        "# ---- Manual edits below are OK (column definitions, view settings, etc.) ----",
+        ""
+      ].join("\n");
+      const newText = text.slice(0, contentStart) + managed + cleanedInner + text.slice(closeFenceIdx);
+      await app.vault.modify(file, newText);
+      text = newText;
+      info = findBaseBlock(text);
+      return info ?? null;
+    }
+  }
+
+  // 3) No Base block exists in the note: append a new one at the end
   const template = [
     "",
     "```base",
