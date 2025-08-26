@@ -1,0 +1,6 @@
+{
+  "enablePrefix": true,
+  "enableSuffix": true,
+  "enableSubstring": true,
+  "refreshDelayMs": 1500
+}
