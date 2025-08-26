@@ -167,19 +167,24 @@ function buildFiltersFromInput(input: string, allTags: string[], caret: number |
   for (const part of parts) {
     const isHash = part.startsWith('#');
     const base = isHash ? part.slice(1).trim() : part;
-    // Match modes same as suggestions: prefix → suffix → substring (deduplicated)
-    const pref = modes.enablePrefix ? prefixMatch(allTags, base, 200) : [];
-    const suff = modes.enableSuffix ? suffixMatch(allTags, base, 200) : [];
-    const subs = modes.enableSubstring ? substringMatch(allTags, base, 200) : [];
-    const seen = new Set<string>();
-    const merged: string[] = [];
-    for (const t of pref) { if (!seen.has(t)) { seen.add(t); merged.push(t); } }
-    for (const t of suff) { if (!seen.has(t)) { seen.add(t); merged.push(t); } }
-    for (const t of subs) { if (!seen.has(t)) { seen.add(t); merged.push(t); } }
 
+    // Always include the base term itself
     const list: string[] = [];
     if (base) list.push(`"${escapeQuote(base)}"`);
-    for (const t of merged.slice(0, 60)) list.push(`"${escapeQuote(t)}"`);
+
+    // If token doesn't start with '#', expand suggestions; otherwise keep only the base tag
+    if (!isHash) {
+      const pref = modes.enablePrefix ? prefixMatch(allTags, base, 200) : [];
+      const suff = modes.enableSuffix ? suffixMatch(allTags, base, 200) : [];
+      const subs = modes.enableSubstring ? substringMatch(allTags, base, 200) : [];
+      const seen = new Set<string>();
+      const merged: string[] = [];
+      for (const t of pref) { if (!seen.has(t)) { seen.add(t); merged.push(t); } }
+      for (const t of suff) { if (!seen.has(t)) { seen.add(t); merged.push(t); } }
+      for (const t of subs) { if (!seen.has(t)) { seen.add(t); merged.push(t); } }
+      for (const t of merged.slice(0, 60)) list.push(`"${escapeQuote(t)}"`);
+    }
+
     lines.push(`    - file.tags.containsAny([${list.join(", ")}])`);
   }
 
