@@ -1,7 +1,7 @@
 {
   "id": "base-live-filter",
   "name": "Base Live Filter",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "minAppVersion": "1.6.0",
   "main": "main.js",
   "description": "Show an input above embedded Base blocks to instantly filter notes by tags (real-time).",
