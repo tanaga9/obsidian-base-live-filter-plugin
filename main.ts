@@ -88,6 +88,9 @@ function extractSavedState(text: string): { input: string; caret: number } | nul
 const FENCE_START = "```base";
 const BEGIN_MARK = "# BEGIN FILTERS (managed by obsidian-base-live-filter-plugin)";
 const END_MARK = "# END FILTERS";
+const MIN_FILTER_TEXT_LENGTH = 200;
+const DEFAULT_FILTER_TEXT_LENGTH = 2000;
+const MAX_FILTER_TEXT_LENGTH = 10000;
 
 type BaseBlockInfo = { start: number; end: number; filtersStart: number; filtersEnd: number };
 
@@ -200,7 +203,13 @@ function supportsContainsAny(): boolean {
   return false;
 }
 
-type MatchSettings = { enablePrefix: boolean; enableSuffix: boolean; enableSubstring: boolean; refreshDelayMs: number };
+type MatchSettings = {
+  enablePrefix: boolean;
+  enableSuffix: boolean;
+  enableSubstring: boolean;
+  refreshDelayMs: number;
+  maxFilterTextLength: number;
+};
 
 function buildFiltersFromInput(input: string, allTags: string[], caret: number | undefined, modes: MatchSettings): string {
   const s = input.trim();
@@ -464,6 +473,10 @@ export default class BaseInstantFilterPlugin extends Plugin {
           const caretNow = (input as HTMLInputElement).selectionStart ?? val.length;
           this.inputStore.set(key, { value: val, caret: caretNow });
           const filters = buildFiltersFromInput(val, allTags, caretNow, this.settings);
+          if (filters.length > this.settings.maxFilterTextLength) {
+            new Notice(`Base Live Filter: filter text is too long (${filters.length}/${this.settings.maxFilterTextLength}). Update skipped.`);
+            return;
+          }
           await replaceFiltersInBaseBlock(this.app, file, block, filters);
         }, () => this.settings.refreshDelayMs);
 
@@ -508,8 +521,18 @@ export default class BaseInstantFilterPlugin extends Plugin {
 
   async loadSettings() {
     const data = (await this.loadData()) as Partial<MatchSettings> | null;
-    const defaults: MatchSettings = { enablePrefix: true, enableSuffix: true, enableSubstring: true, refreshDelayMs: 1000 };
+    const defaults: MatchSettings = {
+      enablePrefix: true,
+      enableSuffix: true,
+      enableSubstring: true,
+      refreshDelayMs: 1000,
+      maxFilterTextLength: DEFAULT_FILTER_TEXT_LENGTH
+    };
     this.settings = { ...defaults, ...(data ?? {}) };
+    this.settings.maxFilterTextLength = Math.min(
+      MAX_FILTER_TEXT_LENGTH,
+      Math.max(MIN_FILTER_TEXT_LENGTH, Number(this.settings.maxFilterTextLength) || DEFAULT_FILTER_TEXT_LENGTH)
+    );
   }
 
   async saveSettings() {
@@ -577,6 +600,29 @@ class MatchSettingTab extends PluginSettingTab {
         delaySetting.setName(`Refresh interval: ${v} ms`);
         await this.plugin.saveSettings();
         this.plugin.configureRefreshTags();
+      }));
+
+    const lengthSetting = new Setting(containerEl)
+      .setName(`Filter text limit: ${this.plugin.settings.maxFilterTextLength} chars`)
+      .setDesc(`Skip updates when generated filter text exceeds this length (${MIN_FILTER_TEXT_LENGTH}-${MAX_FILTER_TEXT_LENGTH})`);
+    const lengthChoices = [200, 300, 500, 750, 1000, 1500, 2000, 3000, 4000, 5000, 7500, 10000];
+    const nearestLengthIndex = (val: number) => {
+      let idx = 0; let best = Number.POSITIVE_INFINITY;
+      for (let i = 0; i < lengthChoices.length; i++) {
+        const d = Math.abs(lengthChoices[i] - val);
+        if (d < best) { best = d; idx = i; }
+      }
+      return idx;
+    };
+    const initialLengthIdx = nearestLengthIndex(this.plugin.settings.maxFilterTextLength);
+    lengthSetting.addSlider(sl => sl
+      .setLimits(0, lengthChoices.length - 1, 1)
+      .setValue(initialLengthIdx)
+      .onChange(async (idx) => {
+        const v = lengthChoices[Math.max(0, Math.min(lengthChoices.length - 1, idx)) | 0];
+        this.plugin.settings.maxFilterTextLength = v;
+        lengthSetting.setName(`Filter text limit: ${v} chars`);
+        await this.plugin.saveSettings();
       }));
   }
 }
