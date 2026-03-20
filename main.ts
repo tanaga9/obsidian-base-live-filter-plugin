@@ -74,10 +74,10 @@ function extractSavedState(text: string): { input: string; caret: number } | nul
   const info = findBaseBlock(text);
   if (!info) return null;
   const segment = text.slice(info.filtersStart, info.filtersEnd);
-  const mInput = segment.match(/^#\s*INPUT:\s*(.+)$/m);
+  const mInput = segment.match(/^#\s*INPUT:[ \t]*(.*)$/m);
   const mCaret = segment.match(/^#\s*CARET:\s*(\d+)$/m);
   if (!mInput && !mCaret) return null;
-  const input = mInput ? decodeState(mInput[1].trim()) : "";
+  const input = mInput ? decodeState(mInput[1]) : "";
   const caret = mCaret ? parseInt(mCaret[1], 10) : input.length;
   return { input, caret: isNaN(caret) ? input.length : caret };
 }
