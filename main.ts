@@ -630,8 +630,8 @@ class MatchSettingTab extends PluginSettingTab {
       }));
 
     const minCharsSetting = new Setting(containerEl)
-      .setName(`Min chars before filter update: ${this.plugin.settings.minTagExpansionTermLength}`)
-      .setDesc('Do not rewrite filters until a non-hash token reaches this length');
+      .setName(`Min chars before tag expansion: ${this.plugin.settings.minTagExpansionTermLength}`)
+      .setDesc('Only expand matching tags after a non-hash token reaches this length');
     const minCharsChoices = [1, 2, 3, 4, 5];
     const initialMinCharsIdx = Math.max(0, minCharsChoices.indexOf(this.plugin.settings.minTagExpansionTermLength));
     minCharsSetting.addSlider(sl => sl
@@ -640,7 +640,7 @@ class MatchSettingTab extends PluginSettingTab {
       .onChange(async (idx) => {
         const v = minCharsChoices[Math.max(0, Math.min(minCharsChoices.length - 1, idx)) | 0];
         this.plugin.settings.minTagExpansionTermLength = v;
-        minCharsSetting.setName(`Min chars before filter update: ${v}`);
+        minCharsSetting.setName(`Min chars before tag expansion: ${v}`);
         await this.plugin.saveSettings();
       }));
   }
