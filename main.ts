@@ -204,12 +204,6 @@ function supportsContainsAny(): boolean {
   return false;
 }
 
-function shouldSkipFilterUpdate(input: string, minTagExpansionTermLength: number): boolean {
-  const parts = input.trim().split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return false;
-  return parts.some(part => !part.startsWith('#') && part.trim().length < minTagExpansionTermLength);
-}
-
 type MatchSettings = {
   enablePrefix: boolean;
   enableSuffix: boolean;
@@ -478,17 +472,13 @@ export default class BaseInstantFilterPlugin extends Plugin {
           const val = (input as HTMLInputElement).value ?? "";
           const caretNow = (input as HTMLInputElement).selectionStart ?? val.length;
           this.inputStore.set(key, { value: val, caret: caretNow });
-          if (shouldSkipFilterUpdate(val, this.settings.minTagExpansionTermLength)) {
-            new Notice(`Base Live Filter: type at least ${this.settings.minTagExpansionTermLength} characters before updating filters.`);
-            return;
-          }
-          const block = await findOrInsertBaseBlock(this.app, file);
-          if (!block) return;
           const filters = buildFiltersFromInput(val, allTags, caretNow, this.settings);
           if (filters.length > this.settings.maxFilterTextLength) {
             new Notice(`Base Live Filter: filter text is too long (${filters.length}/${this.settings.maxFilterTextLength}). Update skipped.`);
             return;
           }
+          const block = await findOrInsertBaseBlock(this.app, file);
+          if (!block) return;
           await replaceFiltersInBaseBlock(this.app, file, block, filters);
         }, () => this.settings.refreshDelayMs);
 
