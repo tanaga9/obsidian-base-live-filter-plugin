@@ -74,10 +74,10 @@ function extractSavedState(text: string): { input: string; caret: number } | nul
   const info = findBaseBlock(text);
   if (!info) return null;
   const segment = text.slice(info.filtersStart, info.filtersEnd);
-  const mInput = segment.match(/^#\s*INPUT:\s*(.+)$/m);
+  const mInput = segment.match(/^#\s*INPUT:[ \t]*(.*)$/m);
   const mCaret = segment.match(/^#\s*CARET:\s*(\d+)$/m);
   if (!mInput && !mCaret) return null;
-  const input = mInput ? decodeState(mInput[1].trim()) : "";
+  const input = mInput ? decodeState(mInput[1]) : "";
   const caret = mCaret ? parseInt(mCaret[1], 10) : input.length;
   return { input, caret: isNaN(caret) ? input.length : caret };
 }
@@ -88,6 +88,10 @@ function extractSavedState(text: string): { input: string; caret: number } | nul
 const FENCE_START = "```base";
 const BEGIN_MARK = "# BEGIN FILTERS (managed by obsidian-base-live-filter-plugin)";
 const END_MARK = "# END FILTERS";
+const MIN_FILTER_TEXT_LENGTH = 200;
+const DEFAULT_FILTER_TEXT_LENGTH = 2000;
+const MAX_FILTER_TEXT_LENGTH = 10000;
+const DEFAULT_MIN_TAG_EXPANSION_TERM_LENGTH = 2;
 
 type BaseBlockInfo = { start: number; end: number; filtersStart: number; filtersEnd: number };
 
@@ -200,7 +204,14 @@ function supportsContainsAny(): boolean {
   return false;
 }
 
-type MatchSettings = { enablePrefix: boolean; enableSuffix: boolean; enableSubstring: boolean; refreshDelayMs: number };
+type MatchSettings = {
+  enablePrefix: boolean;
+  enableSuffix: boolean;
+  enableSubstring: boolean;
+  refreshDelayMs: number;
+  maxFilterTextLength: number;
+  minTagExpansionTermLength: number;
+};
 
 function buildFiltersFromInput(input: string, allTags: string[], caret: number | undefined, modes: MatchSettings): string {
   const s = input.trim();
@@ -223,7 +234,7 @@ function buildFiltersFromInput(input: string, allTags: string[], caret: number |
     if (base) list.push(`"${escapeQuote(base)}"`);
 
     // If token doesn't start with '#', expand suggestions; otherwise keep only the base tag
-    if (!isHash) {
+    if (!isHash && base.length >= modes.minTagExpansionTermLength) {
       const pref = modes.enablePrefix ? prefixMatch(allTags, base, 200) : [];
       const suff = modes.enableSuffix ? suffixMatch(allTags, base, 200) : [];
       const subs = modes.enableSubstring ? substringMatch(allTags, base, 200) : [];
@@ -458,12 +469,16 @@ export default class BaseInstantFilterPlugin extends Plugin {
         const debounced = debounceDynamic(async () => {
           const file = ctx.sourcePath ? (this.app.vault.getAbstractFileByPath(ctx.sourcePath) as TFile) : null;
           if (!file) return;
-          const block = await findOrInsertBaseBlock(this.app, file);
-          if (!block) return;
           const val = (input as HTMLInputElement).value ?? "";
           const caretNow = (input as HTMLInputElement).selectionStart ?? val.length;
           this.inputStore.set(key, { value: val, caret: caretNow });
           const filters = buildFiltersFromInput(val, allTags, caretNow, this.settings);
+          if (filters.length > this.settings.maxFilterTextLength) {
+            new Notice(`Base Live Filter: filter text is too long (${filters.length}/${this.settings.maxFilterTextLength}). Update skipped.`);
+            return;
+          }
+          const block = await findOrInsertBaseBlock(this.app, file);
+          if (!block) return;
           await replaceFiltersInBaseBlock(this.app, file, block, filters);
         }, () => this.settings.refreshDelayMs);
 
@@ -508,8 +523,20 @@ export default class BaseInstantFilterPlugin extends Plugin {
 
   async loadSettings() {
     const data = (await this.loadData()) as Partial<MatchSettings> | null;
-    const defaults: MatchSettings = { enablePrefix: true, enableSuffix: true, enableSubstring: true, refreshDelayMs: 1000 };
+    const defaults: MatchSettings = {
+      enablePrefix: true,
+      enableSuffix: true,
+      enableSubstring: true,
+      refreshDelayMs: 1000,
+      maxFilterTextLength: DEFAULT_FILTER_TEXT_LENGTH,
+      minTagExpansionTermLength: DEFAULT_MIN_TAG_EXPANSION_TERM_LENGTH
+    };
     this.settings = { ...defaults, ...(data ?? {}) };
+    this.settings.maxFilterTextLength = Math.min(
+      MAX_FILTER_TEXT_LENGTH,
+      Math.max(MIN_FILTER_TEXT_LENGTH, Number(this.settings.maxFilterTextLength) || DEFAULT_FILTER_TEXT_LENGTH)
+    );
+    this.settings.minTagExpansionTermLength = Math.max(1, Number(this.settings.minTagExpansionTermLength) || DEFAULT_MIN_TAG_EXPANSION_TERM_LENGTH);
   }
 
   async saveSettings() {
@@ -577,6 +604,44 @@ class MatchSettingTab extends PluginSettingTab {
         delaySetting.setName(`Refresh interval: ${v} ms`);
         await this.plugin.saveSettings();
         this.plugin.configureRefreshTags();
+      }));
+
+    const lengthSetting = new Setting(containerEl)
+      .setName(`Filter text limit: ${this.plugin.settings.maxFilterTextLength} chars`)
+      .setDesc(`Skip updates when generated filter text exceeds this length (${MIN_FILTER_TEXT_LENGTH}-${MAX_FILTER_TEXT_LENGTH})`);
+    const lengthChoices = [200, 300, 500, 750, 1000, 1500, 2000, 3000, 4000, 5000, 7500, 10000];
+    const nearestLengthIndex = (val: number) => {
+      let idx = 0; let best = Number.POSITIVE_INFINITY;
+      for (let i = 0; i < lengthChoices.length; i++) {
+        const d = Math.abs(lengthChoices[i] - val);
+        if (d < best) { best = d; idx = i; }
+      }
+      return idx;
+    };
+    const initialLengthIdx = nearestLengthIndex(this.plugin.settings.maxFilterTextLength);
+    lengthSetting.addSlider(sl => sl
+      .setLimits(0, lengthChoices.length - 1, 1)
+      .setValue(initialLengthIdx)
+      .onChange(async (idx) => {
+        const v = lengthChoices[Math.max(0, Math.min(lengthChoices.length - 1, idx)) | 0];
+        this.plugin.settings.maxFilterTextLength = v;
+        lengthSetting.setName(`Filter text limit: ${v} chars`);
+        await this.plugin.saveSettings();
+      }));
+
+    const minCharsSetting = new Setting(containerEl)
+      .setName(`Min chars before tag expansion: ${this.plugin.settings.minTagExpansionTermLength}`)
+      .setDesc('Only expand matching tags after a non-hash token reaches this length');
+    const minCharsChoices = [1, 2, 3, 4, 5];
+    const initialMinCharsIdx = Math.max(0, minCharsChoices.indexOf(this.plugin.settings.minTagExpansionTermLength));
+    minCharsSetting.addSlider(sl => sl
+      .setLimits(0, minCharsChoices.length - 1, 1)
+      .setValue(initialMinCharsIdx >= 0 ? initialMinCharsIdx : 1)
+      .onChange(async (idx) => {
+        const v = minCharsChoices[Math.max(0, Math.min(minCharsChoices.length - 1, idx)) | 0];
+        this.plugin.settings.minTagExpansionTermLength = v;
+        minCharsSetting.setName(`Min chars before tag expansion: ${v}`);
+        await this.plugin.saveSettings();
       }));
   }
 }
