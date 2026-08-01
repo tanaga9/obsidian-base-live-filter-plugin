@@ -5,7 +5,6 @@ import {
   MarkdownView,
   AbstractInputSuggest,
   MarkdownPostProcessorContext,
-  Notice,
   PluginSettingTab,
   Setting
 } from "obsidian";
@@ -148,7 +147,7 @@ async function findOrInsertBaseBlock(app: App, file: TFile): Promise<BaseBlockIn
       // Build our managed section to inject at the top of the Base block
       const managed = [
         BEGIN_MARK,
-        "filters:\n  - contains(file.tags, \"\")",
+        "filters:",
         END_MARK,
         "# ---- Manual edits below are OK (column definitions, view settings, etc.) ----",
         ""
@@ -166,7 +165,7 @@ async function findOrInsertBaseBlock(app: App, file: TFile): Promise<BaseBlockIn
     "",
     "```base",
     BEGIN_MARK,
-    "filters:\n  - contains(file.tags, \"\")",
+    "filters:",
     END_MARK,
     "# ---- Manual edits below are OK (column definitions, view settings, etc.) ----",
     "```",
@@ -195,14 +194,17 @@ async function replaceFiltersInBaseBlock(app: App, file: TFile, info: BaseBlockI
 /* =======================================================
  * Generate Base filters
  * ======================================================= */
-function escapeQuote(s: string) {
-  return s.replace(/"/g, '\\"');
+function escapeFormulaString(s: string) {
+  return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
-function supportsContainsAny(): boolean {
-  // TODO: Verify behavior and switch to true if supported
-  return false;
+function yamlSingleQuote(s: string) {
+  return `'${s.replace(/'/g, "''")}'`;
 }
+
+type FilterBuildResult =
+  | { ok: true; filters: string }
+  | { ok: false; reason: string };
 
 type MatchSettings = {
   enablePrefix: boolean;
@@ -213,49 +215,247 @@ type MatchSettings = {
   minTagExpansionTermLength: number;
 };
 
-function buildFiltersFromInput(input: string, allTags: string[], caret: number | undefined, modes: MatchSettings): string {
+type QueryToken =
+  | { type: "term"; value: string; explicitHash: boolean }
+  | { type: "or" | "minus" | "lparen" | "rparen" };
+
+type QueryNode =
+  | { type: "term"; value: string; explicitHash: boolean }
+  | { type: "and"; children: QueryNode[] }
+  | { type: "or"; children: QueryNode[] }
+  | { type: "not"; child: QueryNode };
+
+function tokenizeTagQuery(input: string): QueryToken[] | null {
+  const tokens: QueryToken[] = [];
+  let i = 0;
+  while (i < input.length) {
+    const ch = input[i];
+    if (/\s/.test(ch)) {
+      i++;
+      continue;
+    }
+    if (ch === "(") {
+      tokens.push({ type: "lparen" });
+      i++;
+      continue;
+    }
+    if (ch === ")") {
+      tokens.push({ type: "rparen" });
+      i++;
+      continue;
+    }
+    if (ch === "|") {
+      const prev = i === 0 ? "" : input[i - 1];
+      const next = i + 1 >= input.length ? "" : input[i + 1];
+      const prevBoundary = i === 0 || /\s/.test(prev) || prev === "(" || prev === ")";
+      const nextBoundary = i + 1 >= input.length || /\s/.test(next) || next === "(" || next === ")";
+      if (!prevBoundary || !nextBoundary) return null;
+      tokens.push({ type: "or" });
+      i++;
+      continue;
+    }
+    if (ch === "-") {
+      tokens.push({ type: "minus" });
+      i++;
+      continue;
+    }
+
+    let end = i;
+    while (end < input.length && !/\s/.test(input[end]) && input[end] !== "(" && input[end] !== ")") {
+      end++;
+    }
+    const raw = input.slice(i, end);
+    const explicitHash = raw.startsWith("#");
+    const value = explicitHash ? raw.slice(1) : raw;
+    if (!value.trim()) return null;
+    tokens.push({ type: "term", value, explicitHash });
+    i = end;
+  }
+  return tokens;
+}
+
+class TagQueryParser {
+  private tokens: QueryToken[];
+  private pos = 0;
+
+  constructor(tokens: QueryToken[]) {
+    this.tokens = tokens;
+  }
+
+  parse(): QueryNode | null {
+    const node = this.parseOr();
+    if (!node || this.peek()) return null;
+    return node;
+  }
+
+  private parseOr(): QueryNode | null {
+    const children: QueryNode[] = [];
+    const first = this.parseAnd();
+    if (!first) return null;
+    children.push(first);
+
+    while (this.match("or")) {
+      const next = this.parseAnd();
+      if (!next) return null;
+      children.push(next);
+    }
+
+    return children.length === 1 ? children[0] : { type: "or", children };
+  }
+
+  private parseAnd(): QueryNode | null {
+    const children: QueryNode[] = [];
+    const first = this.parseUnary();
+    if (!first) return null;
+    children.push(first);
+
+    while (true) {
+      const next = this.peek();
+      if (!next || next.type === "or" || next.type === "rparen") break;
+      if (this.startsUnary(next)) {
+        const implicit = this.parseUnary();
+        if (!implicit) return null;
+        children.push(implicit);
+        continue;
+      }
+      return null;
+    }
+
+    return children.length === 1 ? children[0] : { type: "and", children };
+  }
+
+  private parseUnary(): QueryNode | null {
+    if (this.match("minus")) {
+      const child = this.parseUnary();
+      return child ? { type: "not", child } : null;
+    }
+
+    if (this.match("lparen")) {
+      const node = this.parseOr();
+      if (!node || !this.match("rparen")) return null;
+      return node;
+    }
+
+    const token = this.peek();
+    if (token?.type === "term") {
+      this.pos++;
+      return { type: "term", value: token.value, explicitHash: token.explicitHash };
+    }
+
+    return null;
+  }
+
+  private startsUnary(token: QueryToken) {
+    return token.type === "term" || token.type === "minus" || token.type === "lparen";
+  }
+
+  private peek(): QueryToken | undefined {
+    return this.tokens[this.pos];
+  }
+
+  private match(type: QueryToken["type"]) {
+    if (this.tokens[this.pos]?.type !== type) return false;
+    this.pos++;
+    return true;
+  }
+}
+
+function mergeTagMatches(allTags: string[], term: string, modes: MatchSettings): string[] {
+  const pref = modes.enablePrefix ? prefixMatch(allTags, term, 200) : [];
+  const suff = modes.enableSuffix ? suffixMatch(allTags, term, 200) : [];
+  const subs = modes.enableSubstring ? substringMatch(allTags, term, 200) : [];
+  const seen = new Set<string>();
+  const merged: string[] = [];
+  for (const t of pref) { if (!seen.has(t)) { seen.add(t); merged.push(t); } }
+  for (const t of suff) { if (!seen.has(t)) { seen.add(t); merged.push(t); } }
+  for (const t of subs) { if (!seen.has(t)) { seen.add(t); merged.push(t); } }
+  return merged;
+}
+
+function renderTermFilter(node: Extract<QueryNode, { type: "term" }>, allTags: string[], modes: MatchSettings): string | null {
+  const base = node.value.trim();
+  if (!base) return null;
+
+  const seen = new Set<string>();
+  const tags: string[] = [];
+  const addTag = (tag: string) => {
+    if (!seen.has(tag)) {
+      seen.add(tag);
+      tags.push(tag);
+    }
+  };
+
+  addTag(base);
+  if (!node.explicitHash && base.length >= modes.minTagExpansionTermLength) {
+    for (const tag of mergeTagMatches(allTags, base, modes).slice(0, 60)) addTag(tag);
+  }
+
+  const args = tags.map(t => `"${escapeFormulaString(t)}"`).join(", ");
+  return `file.hasTag(${args})`;
+}
+
+function renderQueryFilter(node: QueryNode, allTags: string[], modes: MatchSettings): string | null {
+  if (node.type === "term") return renderTermFilter(node, allTags, modes);
+  if (node.type === "not") {
+    const child = renderQueryFilter(node.child, allTags, modes);
+    return child ? `!(${child})` : null;
+  }
+
+  const rendered = node.children
+    .map(child => renderQueryFilter(child, allTags, modes))
+    .filter((child): child is string => child != null);
+  if (rendered.length !== node.children.length || rendered.length === 0) return null;
+  if (rendered.length === 1) return rendered[0];
+
+  const op = node.type === "and" ? " && " : " || ";
+  return `(${rendered.join(op)})`;
+}
+
+function getCurrentTagTokenRange(value: string, caret: number): { start: number; end: number; token: string } | null {
+  let start = caret;
+  while (start > 0) {
+    const ch = value[start - 1];
+    if (/\s/.test(ch) || ch === "(" || ch === ")") break;
+    if (ch === "-" && (start - 1 === 0 || /\s|\(/.test(value[start - 2]))) break;
+    start--;
+  }
+
+  let end = caret;
+  while (end < value.length) {
+    const ch = value[end];
+    if (/\s/.test(ch) || ch === "(" || ch === ")") break;
+    end++;
+  }
+
+  const token = value.slice(start, caret);
+  if (!token) return null;
+  return { start, end, token };
+}
+
+function buildFiltersFromInput(input: string, allTags: string[], caret: number | undefined, modes: MatchSettings): FilterBuildResult {
   const s = input.trim();
   if (s.length === 0) {
-    return [
+    return { ok: true, filters: [
       "filters:",
       `# INPUT: ${encodeState(input)}`,
       `# CARET: ${typeof caret === 'number' ? caret : 0}`
-    ].join("\n");
+    ].join("\n") };
   }
 
-  const parts = s.split(/\s+/).filter(Boolean);
-  const lines: string[] = [];
-  for (const part of parts) {
-    const isHash = part.startsWith('#');
-    const base = isHash ? part.slice(1).trim() : part;
+  const tokens = tokenizeTagQuery(s);
+  if (!tokens) return { ok: false, reason: "Invalid query syntax" };
+  const ast = new TagQueryParser(tokens).parse();
+  if (!ast) return { ok: false, reason: "Incomplete query syntax" };
+  const statement = renderQueryFilter(ast, allTags, modes);
+  if (!statement) return { ok: false, reason: "Invalid tag query" };
 
-    // Always include the base term itself
-    const list: string[] = [];
-    if (base) list.push(`"${escapeQuote(base)}"`);
-
-    // If token doesn't start with '#', expand suggestions; otherwise keep only the base tag
-    if (!isHash && base.length >= modes.minTagExpansionTermLength) {
-      const pref = modes.enablePrefix ? prefixMatch(allTags, base, 200) : [];
-      const suff = modes.enableSuffix ? suffixMatch(allTags, base, 200) : [];
-      const subs = modes.enableSubstring ? substringMatch(allTags, base, 200) : [];
-      const seen = new Set<string>();
-      const merged: string[] = [];
-      for (const t of pref) { if (!seen.has(t)) { seen.add(t); merged.push(t); } }
-      for (const t of suff) { if (!seen.has(t)) { seen.add(t); merged.push(t); } }
-      for (const t of subs) { if (!seen.has(t)) { seen.add(t); merged.push(t); } }
-      for (const t of merged.slice(0, 60)) list.push(`"${escapeQuote(t)}"`);
-    }
-
-    lines.push(`    - file.tags.containsAny([${list.join(", ")}])`);
-  }
-
-  return [
+  return { ok: true, filters: [
     "filters:",
     "  and:",
-    ...lines,
+    `    - ${yamlSingleQuote(statement)}`,
     `# INPUT: ${encodeState(input)}`,
     `# CARET: ${typeof caret === 'number' ? caret : input.length}`
-  ].join("\n");
+  ].join("\n") };
 }
 
 /* =======================================================
@@ -275,16 +475,17 @@ class TagSuggest extends AbstractInputSuggest<string> {
     this.getModes = getModes;
   }
 
-  // Autocomplete only the current word (space-delimited) at the caret
+  // Autocomplete only the current tag token at the caret.
   getSuggestions(_q: string): string[] {
     const input = this.inputRef as HTMLInputElement;
     const value = input.value ?? "";
     const caret = input.selectionStart ?? value.length;
-    const left = value.slice(0, caret);
-    const start = left.lastIndexOf(" ") + 1; // space-delimited
-    const token = value.slice(start, caret);
+    const range = getCurrentTagTokenRange(value, caret);
+    const token = range?.token ?? "";
     if (!token) return [];
+    if (token === "|") return [];
     const base = token.startsWith("#") ? token.slice(1) : token;
+    if (!base) return [];
     // Suggestions in order per settings: prefix → suffix → substring (deduplicated)
     const modes = this.getModes();
     const pref = modes.enablePrefix ? prefixMatch(this.allTags, base, 100) : [];
@@ -320,14 +521,10 @@ class TagSuggest extends AbstractInputSuggest<string> {
     const input = this.inputRef as HTMLInputElement;
     const value = input.value ?? "";
     const caret = input.selectionStart ?? value.length;
-    const left = value.slice(0, caret);
-    const right = value.slice(caret);
-    const start = left.lastIndexOf(" ") + 1;
-    // End of the current token (up to next space if any)
-    const matchNextWs = right.match(/\s/);
-    const end = matchNextWs ? caret + (matchNextWs.index ?? 0) : value.length;
-    const before = value.slice(0, start);
-    const after = value.slice(end);
+    const range = getCurrentTagTokenRange(value, caret);
+    if (!range) return;
+    const before = value.slice(0, range.start);
+    const after = value.slice(range.end);
     const needSpace = after.startsWith(" ") ? "" : " ";
     const newValue = before + v + needSpace + after;
     const newCaret = (before + v + needSpace).length;
@@ -368,6 +565,17 @@ export default class BaseInstantFilterPlugin extends Plugin {
       .base-instant-filter { display: block; width: 100%; margin: 0.25rem 0; }
       .base-instant-filter .bif-row { display: flex; align-items: center; gap: 8px; width: 100%; }
       .base-instant-filter .bif-label { white-space: nowrap; color: var(--text-muted); font-size: var(--font-ui-small); }
+      .base-instant-filter .bif-status {
+        display: none;
+        margin: 3px 0 0 calc(4ch + 8px);
+        color: var(--text-error);
+        font-size: var(--font-ui-smaller);
+        line-height: 1.3;
+      }
+      .base-instant-filter.bif-error .bif-status { display: block; }
+      .base-instant-filter.bif-error input[type="text"] {
+        border-color: var(--text-error);
+      }
       .base-instant-filter input[type="text"] {
         width: 100%;
         max-width: 100%;
@@ -416,6 +624,32 @@ export default class BaseInstantFilterPlugin extends Plugin {
         label.setAttr('for', inputId);
         const input = row.createEl('input', { type: 'text', placeholder: '#tag …' });
         input.id = inputId;
+        const status = container.createDiv({ cls: 'bif-status' });
+        const setQueryError = (message: string | null) => {
+          if (message) {
+            container.addClass('bif-error');
+            status.setText(message);
+          } else {
+            container.removeClass('bif-error');
+            status.setText('');
+          }
+        };
+        const validateInput = () => {
+          const val = (input as HTMLInputElement).value ?? "";
+          const caretNow = (input as HTMLInputElement).selectionStart ?? val.length;
+          const result = buildFiltersFromInput(val, allTags, caretNow, this.settings);
+          if (!result.ok) {
+            setQueryError(result.reason);
+            return result;
+          }
+          if (result.filters.length > this.settings.maxFilterTextLength) {
+            const reason = `Filter text is too long: ${result.filters.length}/${this.settings.maxFilterTextLength} chars`;
+            setQueryError(reason);
+            return { ok: false, reason } as FilterBuildResult;
+          }
+          setQueryError(null);
+          return result;
+        };
 
         // Persist/restore input per block key
         const key = `${ctx.sourcePath ?? ''}::${idx}`;
@@ -428,6 +662,7 @@ export default class BaseInstantFilterPlugin extends Plugin {
             const pos = Math.min(Number(prevCaret) || 0, input.value.length);
             input.setSelectionRange(pos, pos);
           } catch {}
+          validateInput();
         } else {
           // Restore state from comments in the file (avoid duplicate reads within the same file)
           (async () => {
@@ -447,6 +682,7 @@ export default class BaseInstantFilterPlugin extends Plugin {
                   const pos = Math.min(st.caret, input.value.length);
                   input.setSelectionRange(pos, pos);
                 } catch {}
+                validateInput();
               }
             } catch {}
           })();
@@ -472,11 +708,9 @@ export default class BaseInstantFilterPlugin extends Plugin {
           const val = (input as HTMLInputElement).value ?? "";
           const caretNow = (input as HTMLInputElement).selectionStart ?? val.length;
           this.inputStore.set(key, { value: val, caret: caretNow });
-          const filters = buildFiltersFromInput(val, allTags, caretNow, this.settings);
-          if (filters.length > this.settings.maxFilterTextLength) {
-            new Notice(`Base Live Filter: filter text is too long (${filters.length}/${this.settings.maxFilterTextLength}). Update skipped.`);
-            return;
-          }
+          const result = validateInput();
+          if (!result.ok) return;
+          const filters = result.filters;
           const block = await findOrInsertBaseBlock(this.app, file);
           if (!block) return;
           await replaceFiltersInBaseBlock(this.app, file, block, filters);
@@ -507,6 +741,7 @@ export default class BaseInstantFilterPlugin extends Plugin {
             return;
           }
           this.inputStore.set(key, { value: input.value, caret });
+          validateInput();
           debounced();
         });
 
@@ -515,6 +750,7 @@ export default class BaseInstantFilterPlugin extends Plugin {
           const caret = typeof caretPos === 'number' ? caretPos : q.length;
           this.inputStore.set(key, { value: q, caret });
           try { input.setSelectionRange(caret, caret); } catch {}
+          validateInput();
           debounced();
         });
       });

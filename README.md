@@ -105,8 +105,9 @@ Compared with a targeted rewrite of a managed filter section, deep DOM coupling 
 
 - Shows a search box above Base blocks  
 - Instant filtering on every keystroke  
-- Tag autocompletion (prefix match)  
-- Automatically expands suggestions to **containsAny**  
+- Tag autocompletion with prefix, suffix, and substring matching  
+- Boolean tag query syntax with spaces, `|`, `-`, and parentheses
+- Expands non-`#` search terms into matching tags and emits `file.hasTag(...)` filters
 - Keeps your Base **column definitions and display settings** intact (only the filter section is auto-managed)
 
 ---
@@ -127,3 +128,33 @@ Compared with a targeted rewrite of a managed filter section, deep DOM coupling 
    ````
 3. Switch the note to **Reading view**.  
    The Tags input and live filtering UI render in **Reading view** (they are **not shown in Source mode**).
+
+### Tag query syntax
+
+The Tags input accepts a compact Boolean tag query syntax:
+
+```text
+#project #todo
+#project | #personal
+#project -#archived
+(#todo | #waiting) #project
+```
+
+Spaces are treated as implicit `AND`, so `#project #todo` means `#project` and `#todo`.
+The `|` operator means `OR`, and `-` before a term or group means `NOT`.
+
+`|` is only treated as an operator when it is an independent token, such as `#todo | #waiting`. Words like `OR`, `AND`, and `NOT` are ordinary search terms, not reserved keywords.
+
+Terms that start with `#` are treated as explicit tags and are not expanded:
+
+```text
+#project
+```
+
+Terms without `#` keep the original live-filter behavior: the plugin expands them through the configured prefix, suffix, and substring match modes before generating the Base filter.
+
+```text
+proj
+```
+
+If the query is incomplete, invalid, or expands beyond the configured filter text limit while typing, the input shows an error state, the plugin skips the update, and the previous Base filter remains unchanged.
